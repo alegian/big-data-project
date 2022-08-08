@@ -6,6 +6,12 @@ __pycache__/
 # C extensions
 *.so
 
+# test data files
+*.csv
+
+# db key
+secure-connect-bigdataproject.zip
+
 # Distribution / packaging
 .Python
 build/
