@@ -1,0 +1,26 @@
+----TABLE 1
+movie->title	
+rating->movieId
+rating->userId
+rating->rating
+rating->timestamp
+
+----TABLE 2
+movie->title
+movie->genre
+rating->rating
+genome_tags->tag
+genome_scores->relevance
+
+----TABLE 3
+movie->title
+movie->genre
+rating->timestamp
+
+----TABLE 4
+movie->title
+
+----TABLE 5
+movie->title
+tag->tag
+rating->rating
