@@ -1,8 +1,7 @@
-from cassandra import ConsistencyLevel
 from cassandra.cluster import Cluster
 from cassandra.auth import PlainTextAuthProvider
-import csv
-import datetime
+from os.path import exists
+import pandas as pd
 
 
 def db_connect():
@@ -35,17 +34,23 @@ def insert_movie_ratings(session):
         INSERT INTO main.movie_ratings (user_id, movie_id, rating, rating_timestamp) 
         VALUES (?, ?, ?, ?)
     """)
-    with open('./rating.csv', newline='') as csvfile:
-        reader = csv.reader(csvfile, delimiter=',')
-        reader.__next__()
-        for row in reader:
-            session.execute(rating_insert_query, [int(row[0]), int(row[1]), float(row[2]), datetime.datetime.strptime(row[3], '%Y-%m-%d %H:%M:%S')])
+    # session.execute(rating_insert_query, [int(row[0]), int(row[1]), float(row[2]), datetime.datetime.strptime(row[3], '%Y-%m-%d %H:%M:%S')])
+
+
+def create_movie_ratings_csv():
+    if not exists('movie_ratings.csv'):
+        print('creating movie_ratings.csv...')
+        movie_df = pd.read_csv('movie.csv')
+        rating_df = pd.read_csv('rating.csv')
+
+        movie_ratings_df = rating_df.join(movie_df[['movieId', 'title']].set_index('movieId'), on='movieId')
+        movie_ratings_df.to_csv('movie_ratings.csv', index=False)
 
 
 if __name__ == '__main__':
     session = db_connect()
     db_setup(session)
 
-    insert_movie_ratings(session)
+    create_movie_ratings_csv()
 
     session.shutdown()
