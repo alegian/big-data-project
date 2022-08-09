@@ -1,26 +1,19 @@
-----TABLE 1
+----MOVIE RATINGS (query 1)
 movie->title	
 rating->movieId
 rating->userId
 rating->rating
 rating->timestamp
 
-----TABLE 2
+----MOVIE DETAILS (query 2 & 5)
+movie->movieId
 movie->title
-movie->genre
-rating->rating
-genome_tags->tag
-genome_scores->relevance
-
-----TABLE 3
-movie->title
-movie->genre
-rating->timestamp
-
-----TABLE 4
-movie->title
-
-----TABLE 5
-movie->title
+movie->genres
+rating->avg_rating(aggregation)
 tag->tag
-rating->rating
+
+----MOVIE GENRES (queries 3 & 4)
+movie->movieId
+movie->title
+movie->genres
+movie->year(substring title)
