@@ -1,27 +1,33 @@
 from datetime import datetime
 
-from cassandra.cluster import Cluster
+from cassandra import ConsistencyLevel
 from cassandra.auth import PlainTextAuthProvider
+from cassandra.cluster import Cluster, ExecutionProfile, EXEC_PROFILE_DEFAULT
+from cassandra.policies import WhiteListRoundRobinPolicy, DowngradingConsistencyRetryPolicy
+from cassandra.query import tuple_factory
 from os.path import exists
 import os
 import pandas as pd
 import time
 from dotenv import load_dotenv
 load_dotenv()
+pd.options.mode.chained_assignment = None  # default='warn'
 
 
 def db_connect():
     cloud_config = {
         'secure_connect_bundle': './secure-connect-bigdataproject.zip'
     }
+    profile = ExecutionProfile(
+        request_timeout=6000
+    )
     auth_provider = PlainTextAuthProvider(os.environ.get('DB_USER'), os.environ.get('DB_SECRET'))
-    cluster = Cluster(cloud=cloud_config, auth_provider=auth_provider)
-    session = cluster.connect('main')
-    # session.default_consistency_level = ConsistencyLevel.ONE
-    return session
+    cluster = Cluster(cloud=cloud_config, auth_provider=auth_provider, execution_profiles={EXEC_PROFILE_DEFAULT: profile})
+
+    return cluster.connect('main')
 
 
-def db_setup(session):
+def db_setup():
     session.execute("""
     CREATE TABLE IF NOT EXISTS main.movie_ratings (
         movie_title text, 
@@ -54,8 +60,8 @@ def db_setup(session):
         """)
 
 
-def insert_db(session, table_name, df):
-    print(f'Mass inserting 1000 rows into {table_name}. This might take some minutes...')
+def db_insert(table_name, df, consistency):
+    print(f'\t\tMass inserting 1000 rows into {table_name}. This might take some minutes...')
     start = time.time()
 
     for row in df.values.tolist():
@@ -64,10 +70,11 @@ def insert_db(session, table_name, df):
             INSERT INTO main.{table_name} ({','.join(df.columns.values.tolist())}) 
             VALUES ({','.join(['?']*len(df.columns))})
         """)
+        insert_query.consistency_level = consistency
         session.execute(insert_query, row)
 
     end = time.time()
-    print(f'Insert 1000 rows into {table_name} took {round(end-start, 4)} seconds')
+    print(f'\t\tInsert 1000 rows into {table_name} took {round(end-start, 4)} seconds')
 
 
 def create_movie_ratings():
@@ -79,7 +86,7 @@ def create_movie_ratings():
         .join(movie_df[['movieId', 'title']].set_index('movieId'), on='movieId')
 
     # rename for compatibility
-    movie_ratings_df = movie_ratings_df.reset_index() \
+    movie_ratings_df = movie_ratings_df \
         .rename(columns={
             'movieId': 'movie_id',
             'title': 'movie_title',
@@ -94,7 +101,7 @@ def create_movie_ratings():
         .apply(lambda d: datetime.strptime(d, '%Y-%m-%d %H:%M:%S'))
     if not exists('movie_ratings.csv'):
         movie_ratings_df = movie_ratings_df.tail(len(movie_ratings_df.index) - 1000)
-        print('creating movie_ratings.csv...')
+        print('\tcreating movie_ratings.csv...')
         movie_ratings_df.to_csv('movie_ratings.csv', index=False)
     return sample
 
@@ -133,7 +140,7 @@ def create_movie_details():
     sample = movie_details_df.head(1000)
     if not exists('movie_details.csv'):
         movie_details_df = movie_details_df.tail(len(movie_details_df.index) - 1000)
-        print('creating movie_details.csv...')
+        print('\tcreating movie_details.csv...')
         movie_details_df.to_csv('movie_details.csv', index=False)
     return sample
 
@@ -172,25 +179,36 @@ def create_movie_genres():
     sample = movie_genres_df.head(1000)
     if not exists('movie_genres.csv'):
         movie_genres_df = movie_genres_df.tail(len(movie_genres_df.index) - 1000)
-        print('creating movie_genres.csv...')
+        print('\tcreating movie_genres.csv...')
         movie_genres_df.to_csv('movie_genres.csv', index=False)
     return sample
 
 
 # creates data for all 3 tables, and inserts it all into CassandraDB
 def create_and_insert_data():
+    print(f'Generating data...')
     movie_ratings_sample = create_movie_ratings()
     movie_details_sample = create_movie_details()
     movie_genres_sample = create_movie_genres()
 
-    insert_db(session, 'movie_ratings', movie_ratings_sample)
-    insert_db(session, 'movie_details', movie_details_sample)
-    insert_db(session, 'movie_genres', movie_genres_sample)
+    print('Testing insert times for different consistency levels:')
+    print('\tConsistency TWO:')
+    db_insert('movie_ratings', movie_ratings_sample, ConsistencyLevel.TWO)
+    db_insert('movie_details', movie_details_sample, ConsistencyLevel.TWO)
+    db_insert('movie_genres', movie_genres_sample, ConsistencyLevel.TWO)
+    print('\tConsistency QUORUM:')
+    db_insert('movie_ratings', movie_ratings_sample, ConsistencyLevel.QUORUM)
+    db_insert('movie_details', movie_details_sample, ConsistencyLevel.QUORUM)
+    db_insert('movie_genres', movie_genres_sample, ConsistencyLevel.QUORUM)
+    print('\tConsistency ALL:')
+    db_insert('movie_ratings', movie_ratings_sample, ConsistencyLevel.ALL)
+    db_insert('movie_details', movie_details_sample, ConsistencyLevel.ALL)
+    db_insert('movie_genres', movie_genres_sample, ConsistencyLevel.ALL)
 
 
 if __name__ == '__main__':
     session = db_connect()
-    db_setup(session)
+    db_setup()
 
     create_and_insert_data()
 
