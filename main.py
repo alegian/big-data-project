@@ -45,9 +45,9 @@ def db_setup():
             movie_genres text, 
             avg_rating float,
             tag text,
-            tag_user_id int,
-            PRIMARY KEY ((movie_id, tag_user_id, tag), avg_rating)
-        ) WITH CLUSTERING ORDER BY (avg_rating DESC);
+            tag_frequency int,
+            PRIMARY KEY ((movie_id, tag), avg_rating, tag_frequency)
+        ) WITH CLUSTERING ORDER BY (avg_rating DESC, tag_frequency DESC);
         """)
     session.execute("""
         CREATE TABLE IF NOT EXISTS main.movie_genres (
@@ -117,14 +117,16 @@ def create_movie_details():
         .groupby('movieId') \
         .mean()\
         .round({'rating': 2})
+    tag_freq_df = tag_df[['movieId', 'tag']]
+    tag_freq_df['tag_frequency'] = tag_freq_df\
+        .groupby(['movieId', 'tag'])['movieId']\
+        .transform('count')
+    tag_freq_df = tag_freq_df.dropna().drop_duplicates()
+    tag_freq_df['tag_frequency'] = tag_freq_df['tag_frequency'].astype(int)
     movie_details_df = avg_ratings_df \
         .join(movie_df[['movieId', 'title', 'genres']].set_index('movieId'), on='movieId')
     movie_details_df = movie_details_df \
-        .join(tag_df[['movieId', 'tag', 'userId']].set_index('movieId'), on='movieId')
-
-    # fix invalid user ids
-    movie_details_df.dropna(inplace=True)
-    movie_details_df.userId = movie_details_df.userId.astype(int)
+        .join(tag_freq_df.set_index('movieId'), how='inner', on='movieId')
 
     # rename for compatibility
     movie_details_df = movie_details_df.reset_index() \
@@ -206,10 +208,43 @@ def create_and_insert_data():
     db_insert('movie_genres', movie_genres_sample, ConsistencyLevel.ALL)
 
 
+def db_query2(consistency):
+    print(f'\t\tQuery 2 running...')
+    start = time.time()
+
+    insert_query = session.prepare(f"""
+        SELECT movie_genres, avg_rating, tag, COUNT(*) AS freq
+        FROM main.movie_details
+        WHERE movie_title = 'Jumanji (1995)'
+        GROUP BY tag
+        --ORDER BY freq DESC
+        LIMIT 5
+        ALLOW FILTERING
+    """)
+    insert_query.consistency_level = consistency
+    out = session.execute(insert_query)
+
+    end = time.time()
+    print(f'\t\tQuery 2 took {round(end - start, 4)} seconds')
+    print(out)
+
+
+def queries():
+    print('Testing query times for different consistency levels:')
+    print('\tConsistency ONE:')
+    db_query2(ConsistencyLevel.ONE)
+    print('\tConsistency QUORUM:')
+    # db_query2(ConsistencyLevel.QUORUM)
+    print('\tConsistency ALL:')
+    # db_query2(ConsistencyLevel.ALL)
+
+
 if __name__ == '__main__':
     session = db_connect()
     db_setup()
 
-    create_and_insert_data()
+    # create_and_insert_data()
+    # queries()
+    movie_details_sample = create_movie_details()
 
     session.shutdown()
