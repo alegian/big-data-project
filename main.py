@@ -1,10 +1,8 @@
 from datetime import datetime
 
-from cassandra import ConsistencyLevel
+from cassandra import ConsistencyLevel, OperationTimedOut
 from cassandra.auth import PlainTextAuthProvider
 from cassandra.cluster import Cluster, ExecutionProfile, EXEC_PROFILE_DEFAULT
-from cassandra.policies import WhiteListRoundRobinPolicy, DowngradingConsistencyRetryPolicy
-from cassandra.query import tuple_factory
 from os.path import exists
 import os
 import pandas as pd
@@ -19,7 +17,7 @@ def db_connect():
         'secure_connect_bundle': './secure-connect-bigdataproject.zip'
     }
     profile = ExecutionProfile(
-        request_timeout=6000
+        request_timeout=100000
     )
     auth_provider = PlainTextAuthProvider(os.environ.get('DB_USER'), os.environ.get('DB_SECRET'))
     cluster = Cluster(cloud=cloud_config, auth_provider=auth_provider, execution_profiles={EXEC_PROFILE_DEFAULT: profile})
@@ -30,34 +28,37 @@ def db_connect():
 def db_setup():
     session.execute("""
     CREATE TABLE IF NOT EXISTS main.movie_ratings (
-        movie_title text, 
-        movie_id int, 
-        user_id int, 
-        rating float,
-        rating_timestamp timestamp,
-        PRIMARY KEY (movie_id, rating, user_id)
-    ) WITH CLUSTERING ORDER BY (rating DESC, user_id ASC);
+        movie_title text,
+        avg_rating float,
+        PRIMARY KEY (movie_title, avg_rating)
+    ) WITH CLUSTERING ORDER BY (avg_rating DESC);
     """)
     session.execute("""
         CREATE TABLE IF NOT EXISTS main.movie_details (
-            movie_title text, 
-            movie_id int, 
+            movie_title text,
             movie_genres text, 
             avg_rating float,
             tag text,
             tag_frequency int,
-            PRIMARY KEY ((movie_id, tag), avg_rating, tag_frequency)
-        ) WITH CLUSTERING ORDER BY (avg_rating DESC, tag_frequency DESC);
-        """)
+            PRIMARY KEY (movie_title, tag_frequency, tag)
+        ) WITH CLUSTERING ORDER BY (tag_frequency DESC, tag DESC);
+    """)
     session.execute("""
         CREATE TABLE IF NOT EXISTS main.movie_genres (
-            movie_title text, 
-            movie_id int, 
+            movie_title text,
             movie_genres text, 
             movie_year int,
-            PRIMARY KEY (movie_id)
+            PRIMARY KEY (movie_title)
         );
-        """)
+    """)
+    session.execute("""
+        CREATE TABLE IF NOT EXISTS main.movie_tags (
+            movie_title text,
+            avg_rating float,
+            tag text,
+            PRIMARY KEY (tag, avg_rating, movie_title)
+        ) WITH CLUSTERING ORDER BY (avg_rating DESC, movie_title DESC);
+    """)
 
 
 def db_insert(table_name, df, consistency):
@@ -77,74 +78,102 @@ def db_insert(table_name, df, consistency):
     print(f'\t\tInsert 1000 rows into {table_name} took {round(end-start, 4)} seconds')
 
 
+def db_truncate(table_name):
+    try:
+        query = session.prepare(f"""
+            TRUNCATE main.{table_name}
+        """)
+        session.execute(query)
+    except OperationTimedOut:
+        print('truncate timed out')
+
+
+start_date = datetime.strptime('2015-01-01', '%Y-%m-%d')
+end_date = datetime.strptime('2015-01-15', '%Y-%m-%d')
+
+
+def is_valid_date(date_str):
+    rating = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+    return start_date <= rating <= end_date
+
+
 def create_movie_ratings():
-    # load data
-    movie_df = pd.read_csv('movie.csv')
-    rating_df = pd.read_csv('rating.csv')
-    # generate table data
-    movie_ratings_df = rating_df\
-        .join(movie_df[['movieId', 'title']].set_index('movieId'), on='movieId')
-
-    # rename for compatibility
-    movie_ratings_df = movie_ratings_df \
-        .rename(columns={
-            'movieId': 'movie_id',
-            'title': 'movie_title',
-            'userId': 'user_id',
-            'timestamp': 'rating_timestamp',
-        })
-
-    # return the first 1000 rows, and create a CSV with the rest
-    sample = movie_ratings_df.head(1000)
-    # fix dates
-    sample['rating_timestamp'] = sample['rating_timestamp'] \
-        .apply(lambda d: datetime.strptime(d, '%Y-%m-%d %H:%M:%S'))
     if not exists('movie_ratings.csv'):
-        movie_ratings_df = movie_ratings_df.tail(len(movie_ratings_df.index) - 1000)
+        # load data
+        movie_df = pd.read_csv('movie.csv')
+        rating_df = pd.read_csv('rating.csv')
+
+        # generate table data
+        rating_df = rating_df[rating_df['timestamp'].apply(is_valid_date)]
+        rating_df = rating_df[['movieId', 'rating']] \
+            .groupby('movieId') \
+            .mean() \
+            .round({'rating': 2})
+        movie_ratings_df = rating_df\
+            .join(movie_df[['movieId', 'title']].set_index('movieId'), on='movieId')
+
+        # rename for compatibility
+        movie_ratings_df = movie_ratings_df \
+            .reset_index() \
+            .drop(columns=['movieId']) \
+            .rename(columns={
+                'title': 'movie_title',
+                'rating': 'avg_rating'
+            })
+
+        # return the first 1000 rows, and create a CSV with the rest
         print('\tcreating movie_ratings.csv...')
         movie_ratings_df.to_csv('movie_ratings.csv', index=False)
-    return sample
+        sample = movie_ratings_df.head(1000)
+        return sample
+    else:
+        movie_ratings_df = pd.read_csv('movie_ratings.csv')
+        sample = movie_ratings_df.head(1000)
+        return sample
 
 
 def create_movie_details():
-    # load data
-    movie_df = pd.read_csv('movie.csv')
-    rating_df = pd.read_csv('rating.csv')
-    tag_df = pd.read_csv('tag.csv')
-
-    # generate table data
-    avg_ratings_df = rating_df[['movieId', 'rating']] \
-        .groupby('movieId') \
-        .mean()\
-        .round({'rating': 2})
-    tag_freq_df = tag_df[['movieId', 'tag']]
-    tag_freq_df['tag_frequency'] = tag_freq_df\
-        .groupby(['movieId', 'tag'])['movieId']\
-        .transform('count')
-    tag_freq_df = tag_freq_df.dropna().drop_duplicates()
-    tag_freq_df['tag_frequency'] = tag_freq_df['tag_frequency'].astype(int)
-    movie_details_df = avg_ratings_df \
-        .join(movie_df[['movieId', 'title', 'genres']].set_index('movieId'), on='movieId')
-    movie_details_df = movie_details_df \
-        .join(tag_freq_df.set_index('movieId'), how='inner', on='movieId')
-
-    # rename for compatibility
-    movie_details_df = movie_details_df.reset_index() \
-        .rename(columns={
-            'rating': 'avg_rating',
-            'movieId': 'movie_id',
-            'title': 'movie_title',
-            'genres': 'movie_genres',
-            'userId': 'tag_user_id'
-        })
-
-    # return the first 1000 rows, and create a CSV with the rest
-    sample = movie_details_df.head(1000)
     if not exists('movie_details.csv'):
-        movie_details_df = movie_details_df.tail(len(movie_details_df.index) - 1000)
+        # load data
+        movie_df = pd.read_csv('movie.csv')
+        rating_df = pd.read_csv('rating.csv')
+        tag_df = pd.read_csv('tag.csv')
+
+        # generate table data
+        avg_ratings_df = rating_df[['movieId', 'rating']] \
+            .groupby('movieId') \
+            .mean()\
+            .round({'rating': 2})
+        tag_freq_df = tag_df[['movieId', 'tag']]
+        tag_freq_df['tag_frequency'] = tag_freq_df\
+            .groupby(['movieId', 'tag'])['movieId']\
+            .transform('count')
+        tag_freq_df = tag_freq_df.dropna().drop_duplicates()
+        tag_freq_df['tag_frequency'] = tag_freq_df['tag_frequency'].astype(int)
+        movie_details_df = avg_ratings_df \
+            .join(movie_df[['movieId', 'title', 'genres']].set_index('movieId'), on='movieId')
+        movie_details_df = movie_details_df \
+            .join(tag_freq_df.set_index('movieId'), how='inner', on='movieId')
+
+        # rename for compatibility
+        movie_details_df = movie_details_df\
+            .reset_index()\
+            .drop(columns=['movieId']) \
+            .rename(columns={
+                'rating': 'avg_rating',
+                'title': 'movie_title',
+                'genres': 'movie_genres'
+            })
+
+        # return the first 1000 rows, and create a CSV with the rest
         print('\tcreating movie_details.csv...')
         movie_details_df.to_csv('movie_details.csv', index=False)
-    return sample
+        sample = movie_details_df.head(1000)
+        return sample
+    else:
+        movie_details_df = pd.read_csv('movie_details.csv')
+        sample = movie_details_df.head(1000)
+        return sample
 
 
 # string hack to get movie year that appears in the form (1999) at the end of a string title
@@ -161,29 +190,70 @@ def extract_year_from_title(title):
 
 
 def create_movie_genres():
-    # load data
-    movie_df = pd.read_csv('movie.csv')
-
-    # generate table data
-    movie_genres_df = movie_df.copy()
-    # smart substring & typecast to extract year
-    movie_genres_df['movie_year'] = movie_df['title'].apply(extract_year_from_title)
-
-    # rename for compatibility
-    movie_genres_df = movie_genres_df \
-        .rename(columns={
-            'genres': 'movie_genres',
-            'movieId': 'movie_id',
-            'title': 'movie_title'
-         })
-
-    # return the first 1000 rows, and create a CSV with the rest
-    sample = movie_genres_df.head(1000)
     if not exists('movie_genres.csv'):
-        movie_genres_df = movie_genres_df.tail(len(movie_genres_df.index) - 1000)
+        # load data
+        movie_df = pd.read_csv('movie.csv')
+
+        # generate table data
+        movie_genres_df = movie_df.copy()
+        # smart substring & typecast to extract year
+        movie_genres_df['movie_year'] = movie_df['title'].apply(extract_year_from_title)
+
+        # rename for compatibility
+        movie_genres_df = movie_genres_df \
+            .drop(columns=['movieId']) \
+            .rename(columns={
+                'genres': 'movie_genres',
+                'title': 'movie_title'
+             })
+
+        # return the first 1000 rows, and create a CSV with the rest
         print('\tcreating movie_genres.csv...')
         movie_genres_df.to_csv('movie_genres.csv', index=False)
-    return sample
+        sample = movie_genres_df.head(1000)
+        return sample
+    else:
+        movie_genres_df = pd.read_csv('movie_genres.csv')
+        sample = movie_genres_df.head(1000)
+        return sample
+
+
+def create_movie_tags():
+    if not exists('movie_tags.csv'):
+        # load data
+        movie_df = pd.read_csv('movie.csv')
+        rating_df = pd.read_csv('rating.csv')
+        tag_df = pd.read_csv('tag.csv')
+
+        # generate table data
+        avg_ratings_df = rating_df[['movieId', 'rating']] \
+            .groupby('movieId') \
+            .mean()\
+            .round({'rating': 2})
+        tag_df = tag_df[['movieId', 'tag']].dropna().drop_duplicates()
+        movie_tags_df = avg_ratings_df \
+            .join(movie_df[['movieId', 'title']].set_index('movieId'), on='movieId')
+        movie_tags_df = movie_tags_df \
+            .join(tag_df.set_index('movieId'), how='inner', on='movieId')
+
+        # rename for compatibility
+        movie_tags_df = movie_tags_df\
+            .reset_index()\
+            .drop(columns=['movieId']) \
+            .rename(columns={
+                'rating': 'avg_rating',
+                'title': 'movie_title'
+            })
+
+        # return the first 1000 rows, and create a CSV with the rest
+        print('\tcreating movie_tags.csv...')
+        movie_tags_df.to_csv('movie_tags.csv', index=False)
+        sample = movie_tags_df.head(1000)
+        return sample
+    else:
+        movie_tags_df = pd.read_csv('movie_tags.csv')
+        sample = movie_tags_df.head(1000)
+        return sample
 
 
 # creates data for all 3 tables, and inserts it all into CassandraDB
@@ -192,59 +262,123 @@ def create_and_insert_data():
     movie_ratings_sample = create_movie_ratings()
     movie_details_sample = create_movie_details()
     movie_genres_sample = create_movie_genres()
+    movie_tags_sample = create_movie_tags()
+    print(f'Erasing old data...')
+    db_truncate('movie_ratings')
+    db_truncate('movie_details')
+    db_truncate('movie_genres')
 
     print('Testing insert times for different consistency levels:')
     print('\tConsistency TWO:')
     db_insert('movie_ratings', movie_ratings_sample, ConsistencyLevel.TWO)
     db_insert('movie_details', movie_details_sample, ConsistencyLevel.TWO)
     db_insert('movie_genres', movie_genres_sample, ConsistencyLevel.TWO)
+    db_insert('movie_tags', movie_tags_sample, ConsistencyLevel.TWO)
     print('\tConsistency QUORUM:')
     db_insert('movie_ratings', movie_ratings_sample, ConsistencyLevel.QUORUM)
     db_insert('movie_details', movie_details_sample, ConsistencyLevel.QUORUM)
     db_insert('movie_genres', movie_genres_sample, ConsistencyLevel.QUORUM)
+    db_insert('movie_tags', movie_tags_sample, ConsistencyLevel.QUORUM)
     print('\tConsistency ALL:')
     db_insert('movie_ratings', movie_ratings_sample, ConsistencyLevel.ALL)
     db_insert('movie_details', movie_details_sample, ConsistencyLevel.ALL)
     db_insert('movie_genres', movie_genres_sample, ConsistencyLevel.ALL)
+    db_insert('movie_tags', movie_tags_sample, ConsistencyLevel.ALL)
+
+
+def db_query1(consistency):
+    start = time.time()
+
+    rows = []
+
+    for i in range(0, 10):
+        query = session.prepare("""
+            SELECT movie_title, avg_rating
+            FROM main.movie_ratings
+            ORDER BY avg_rating DESC
+            LIMIT 30
+        """)
+        query.consistency_level = consistency
+        rows = session.execute(query)
+
+    end = time.time()
+    print(f'\t\tQuery 1 (10 times) took {round(end - start, 4)} seconds')
+
+    return pd.DataFrame(rows, columns=['movie_title', 'avg_rating'])
 
 
 def db_query2(consistency):
-    print(f'\t\tQuery 2 running...')
     start = time.time()
 
-    insert_query = session.prepare(f"""
-        SELECT movie_genres, avg_rating, tag, COUNT(*) AS freq
-        FROM main.movie_details
-        WHERE movie_title = 'Jumanji (1995)'
-        GROUP BY tag
-        --ORDER BY freq DESC
-        LIMIT 5
-        ALLOW FILTERING
-    """)
-    insert_query.consistency_level = consistency
-    out = session.execute(insert_query)
+    rows = []
+
+    for i in range(0, 10):
+        query = session.prepare("""
+            SELECT movie_title, movie_genres, avg_rating, tag, tag_frequency
+            FROM main.movie_details
+            WHERE movie_title = 'Jumanji (1995)'
+            ORDER BY tag_frequency DESC
+            LIMIT 5
+        """)
+        query.consistency_level = consistency
+        rows = session.execute(query)
 
     end = time.time()
-    print(f'\t\tQuery 2 took {round(end - start, 4)} seconds')
-    print(out)
+    print(f'\t\tQuery 2 (10 times) took {round(end - start, 4)} seconds')
+
+    return pd.DataFrame(rows, columns=['movie_title', 'movie_genres', 'avg_rating', 'tag', 'tag_frequency'])
+
+
+def db_query5(consistency):
+    start = time.time()
+
+    rows = []
+
+    for i in range(0, 10):
+        query = session.prepare("""
+            SELECT movie_title, avg_rating, tag
+            FROM main.movie_tags
+            WHERE tag = 'comedy'
+            ORDER BY avg_rating DESC
+            LIMIT 20
+        """)
+        query.consistency_level = consistency
+        rows = session.execute(query)
+
+    end = time.time()
+    print(f'\t\tQuery 5 (10 times) took {round(end - start, 4)} seconds')
+
+    return pd.DataFrame(rows, columns=['movie_title', 'avg_rating', 'tag'])
 
 
 def queries():
     print('Testing query times for different consistency levels:')
     print('\tConsistency ONE:')
+    db_query1(ConsistencyLevel.ONE)
     db_query2(ConsistencyLevel.ONE)
+    db_query5(ConsistencyLevel.ONE)
     print('\tConsistency QUORUM:')
-    # db_query2(ConsistencyLevel.QUORUM)
+    db_query1(ConsistencyLevel.QUORUM)
+    db_query2(ConsistencyLevel.QUORUM)
+    db_query5(ConsistencyLevel.QUORUM)
     print('\tConsistency ALL:')
-    # db_query2(ConsistencyLevel.ALL)
+    res1 = db_query1(ConsistencyLevel.ALL)
+    res2 = db_query2(ConsistencyLevel.ALL)
+    res5 = db_query5(ConsistencyLevel.ALL)
+
+    print('Query 1 results: ')
+    print(res1.to_string())
+    print('Query 2 results: ')
+    print(res2.to_string())
+    print('Query 5 results: ')
+    print(res5.to_string())
 
 
 if __name__ == '__main__':
     session = db_connect()
     db_setup()
 
-    # create_and_insert_data()
+    create_and_insert_data()
     # queries()
-    movie_details_sample = create_movie_details()
 
     session.shutdown()
