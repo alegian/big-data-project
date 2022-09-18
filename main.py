@@ -7,6 +7,8 @@ from os.path import exists
 import os
 import pandas as pd
 import time
+import ast
+import re
 from dotenv import load_dotenv
 load_dotenv()
 pd.options.mode.chained_assignment = None  # default='warn'
@@ -31,8 +33,8 @@ def db_setup():
         partition_key int,
         movie_title text,
         avg_rating float,
-        PRIMARY KEY (partition_key, avg_rating)
-    ) WITH CLUSTERING ORDER BY (avg_rating DESC);
+        PRIMARY KEY (partition_key, avg_rating, movie_title)
+    ) WITH CLUSTERING ORDER BY (avg_rating DESC, movie_title DESC);
     """)
     session.execute("""
         CREATE TABLE IF NOT EXISTS main.movie_details (
@@ -51,6 +53,13 @@ def db_setup():
             movie_year int,
             PRIMARY KEY (movie_genre, movie_year, movie_title)
         ) WITH CLUSTERING ORDER BY (movie_year DESC, movie_title DESC);
+    """)
+    session.execute("""
+        CREATE TABLE IF NOT EXISTS main.movie_titles (
+            movie_title text,
+            movie_title_split list<text>,
+            PRIMARY KEY (movie_title)
+        );
     """)
     session.execute("""
         CREATE TABLE IF NOT EXISTS main.movie_tags (
@@ -227,6 +236,36 @@ def create_movie_genres():
         return sample
 
 
+def clean_and_split_title(title):
+    return list(filter(None, re.sub(r'[^A-Za-z0-9 ]+', '', title).split(' ')))
+
+
+def create_movie_titles():
+    if not exists('movie_titles.csv'):
+        # load data
+        movie_df = pd.read_csv('movie.csv')
+
+        # create a row for each title-split_title pair
+        movie_titles_df = pd.DataFrame()
+        movie_titles_df['movie_title'] = movie_df.title
+        movie_titles_df['movie_title_split'] = movie_df.title.apply(clean_and_split_title)
+
+        # rename columns for compatibility
+        movie_titles_df.columns = ['movie_title', 'movie_title_split']
+
+
+        # return the first 1000 rows, and create a CSV with the rest
+        print('\tcreating movie_titles.csv...')
+        movie_titles_df.to_csv('movie_titles.csv', index=False)
+        sample = movie_titles_df.head(1000)
+        return sample
+    else:
+        movie_titles_df = pd.read_csv('movie_titles.csv')
+        movie_titles_df['movie_title_split'] = movie_titles_df['movie_title_split'].apply(ast.literal_eval)
+        sample = movie_titles_df.head(1000)
+        return sample
+
+
 def create_movie_tags():
     if not exists('movie_tags.csv'):
         # load data
@@ -271,6 +310,7 @@ def create_and_insert_data():
     movie_ratings_sample = create_movie_ratings()
     movie_details_sample = create_movie_details()
     movie_genres_sample = create_movie_genres()
+    movie_titles_sample = create_movie_titles()
     movie_tags_sample = create_movie_tags()
 
     print('Testing insert times for different consistency levels:')
@@ -278,16 +318,19 @@ def create_and_insert_data():
     db_insert('movie_ratings', movie_ratings_sample, ConsistencyLevel.TWO)
     db_insert('movie_details', movie_details_sample, ConsistencyLevel.TWO)
     db_insert('movie_genres', movie_genres_sample, ConsistencyLevel.TWO)
+    db_insert('movie_titles', movie_titles_sample, ConsistencyLevel.TWO)
     db_insert('movie_tags', movie_tags_sample, ConsistencyLevel.TWO)
     print('\tConsistency QUORUM:')
     db_insert('movie_ratings', movie_ratings_sample, ConsistencyLevel.QUORUM)
     db_insert('movie_details', movie_details_sample, ConsistencyLevel.QUORUM)
     db_insert('movie_genres', movie_genres_sample, ConsistencyLevel.QUORUM)
+    db_insert('movie_titles', movie_titles_sample, ConsistencyLevel.QUORUM)
     db_insert('movie_tags', movie_tags_sample, ConsistencyLevel.QUORUM)
     print('\tConsistency ALL:')
     db_insert('movie_ratings', movie_ratings_sample, ConsistencyLevel.ALL)
     db_insert('movie_details', movie_details_sample, ConsistencyLevel.ALL)
     db_insert('movie_genres', movie_genres_sample, ConsistencyLevel.ALL)
+    db_insert('movie_titles', movie_titles_sample, ConsistencyLevel.ALL)
     db_insert('movie_tags', movie_tags_sample, ConsistencyLevel.ALL)
 
 
@@ -356,6 +399,26 @@ def db_query3(consistency):
     return pd.DataFrame(rows, columns=['movie_title', 'movie_genre', 'movie_year'])
 
 
+def db_query4(consistency):
+    start = time.time()
+
+    rows = []
+
+    for i in range(0, 10):
+        query = session.prepare("""
+            SELECT movie_title
+            FROM main.movie_titles
+            WHERE movie_title_split CONTAINS 'star'
+        """)
+        query.consistency_level = consistency
+        rows = session.execute(query)
+
+    end = time.time()
+    print(f'\t\tQuery 4 (10 times) took {round(end - start, 4)} seconds')
+
+    return pd.DataFrame(rows, columns=['movie_title'])
+
+
 def db_query5(consistency):
     start = time.time()
 
@@ -384,16 +447,19 @@ def queries():
     db_query1(ConsistencyLevel.ONE)
     db_query2(ConsistencyLevel.ONE)
     db_query3(ConsistencyLevel.ONE)
+    db_query4(ConsistencyLevel.ONE)
     db_query5(ConsistencyLevel.ONE)
     print('\tConsistency QUORUM:')
     db_query1(ConsistencyLevel.QUORUM)
     db_query2(ConsistencyLevel.QUORUM)
     db_query3(ConsistencyLevel.QUORUM)
+    db_query4(ConsistencyLevel.QUORUM)
     db_query5(ConsistencyLevel.QUORUM)
     print('\tConsistency ALL:')
     res1 = db_query1(ConsistencyLevel.ALL)
     res2 = db_query2(ConsistencyLevel.ALL)
     res3 = db_query3(ConsistencyLevel.ALL)
+    res4 = db_query4(ConsistencyLevel.ALL)
     res5 = db_query5(ConsistencyLevel.ALL)
 
     print('Query 1 results: ')
@@ -402,6 +468,8 @@ def queries():
     print(res2.to_string())
     print('Query 3 results: ')
     print(res3.to_string())
+    print('Query 4 results: ')
+    print(res4.to_string())
     print('Query 5 results: ')
     print(res5.to_string())
 
@@ -411,6 +479,6 @@ if __name__ == '__main__':
     db_setup()
 
     # create_and_insert_data()
-    # queries()
+    queries()
 
     session.shutdown()
