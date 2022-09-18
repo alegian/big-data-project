@@ -28,9 +28,10 @@ def db_connect():
 def db_setup():
     session.execute("""
     CREATE TABLE IF NOT EXISTS main.movie_ratings (
+        partition_key int,
         movie_title text,
         avg_rating float,
-        PRIMARY KEY (movie_title, avg_rating)
+        PRIMARY KEY (partition_key, avg_rating)
     ) WITH CLUSTERING ORDER BY (avg_rating DESC);
     """)
     session.execute("""
@@ -46,10 +47,10 @@ def db_setup():
     session.execute("""
         CREATE TABLE IF NOT EXISTS main.movie_genres (
             movie_title text,
-            movie_genres text, 
+            movie_genre text, 
             movie_year int,
-            PRIMARY KEY (movie_title)
-        );
+            PRIMARY KEY (movie_genre, movie_year, movie_title)
+        ) WITH CLUSTERING ORDER BY (movie_year DESC, movie_title DESC);
     """)
     session.execute("""
         CREATE TABLE IF NOT EXISTS main.movie_tags (
@@ -88,6 +89,14 @@ def db_truncate(table_name):
         print('truncate timed out')
 
 
+def db_truncate_all():
+    print(f'Erasing old data...')
+    db_truncate('movie_ratings')
+    db_truncate('movie_details')
+    db_truncate('movie_genres')
+    db_truncate('movie_tags')
+
+
 start_date = datetime.strptime('2015-01-01', '%Y-%m-%d')
 end_date = datetime.strptime('2015-01-15', '%Y-%m-%d')
 
@@ -120,6 +129,9 @@ def create_movie_ratings():
                 'title': 'movie_title',
                 'rating': 'avg_rating'
             })
+
+        # constant partition key, allows for global sorting
+        movie_ratings_df['partition_key'] = 0
 
         # return the first 1000 rows, and create a CSV with the rest
         print('\tcreating movie_ratings.csv...')
@@ -194,18 +206,15 @@ def create_movie_genres():
         # load data
         movie_df = pd.read_csv('movie.csv')
 
-        # generate table data
-        movie_genres_df = movie_df.copy()
-        # smart substring & typecast to extract year
-        movie_genres_df['movie_year'] = movie_df['title'].apply(extract_year_from_title)
+        # create a row for each genre-title pair
+        movie_genres_df = pd.DataFrame(movie_df.genres.str.split('|').tolist(), index=movie_df.title).stack()
+        movie_genres_df = movie_genres_df.reset_index([0, 'title'])
 
-        # rename for compatibility
-        movie_genres_df = movie_genres_df \
-            .drop(columns=['movieId']) \
-            .rename(columns={
-                'genres': 'movie_genres',
-                'title': 'movie_title'
-             })
+        # rename columns for compatibility
+        movie_genres_df.columns = ['movie_title', 'movie_genre']
+
+        # smart substring & typecast to extract year
+        movie_genres_df['movie_year'] = movie_genres_df['movie_title'].apply(extract_year_from_title)
 
         # return the first 1000 rows, and create a CSV with the rest
         print('\tcreating movie_genres.csv...')
@@ -263,10 +272,6 @@ def create_and_insert_data():
     movie_details_sample = create_movie_details()
     movie_genres_sample = create_movie_genres()
     movie_tags_sample = create_movie_tags()
-    print(f'Erasing old data...')
-    db_truncate('movie_ratings')
-    db_truncate('movie_details')
-    db_truncate('movie_genres')
 
     print('Testing insert times for different consistency levels:')
     print('\tConsistency TWO:')
@@ -295,6 +300,7 @@ def db_query1(consistency):
         query = session.prepare("""
             SELECT movie_title, avg_rating
             FROM main.movie_ratings
+            WHERE partition_key = 0
             ORDER BY avg_rating DESC
             LIMIT 30
         """)
@@ -329,6 +335,27 @@ def db_query2(consistency):
     return pd.DataFrame(rows, columns=['movie_title', 'movie_genres', 'avg_rating', 'tag', 'tag_frequency'])
 
 
+def db_query3(consistency):
+    start = time.time()
+
+    rows = []
+
+    for i in range(0, 10):
+        query = session.prepare("""
+            SELECT movie_title, movie_genre, movie_year
+            FROM main.movie_genres
+            WHERE movie_genre = 'Adventure'
+            ORDER BY movie_year DESC
+        """)
+        query.consistency_level = consistency
+        rows = session.execute(query)
+
+    end = time.time()
+    print(f'\t\tQuery 3 (10 times) took {round(end - start, 4)} seconds')
+
+    return pd.DataFrame(rows, columns=['movie_title', 'movie_genre', 'movie_year'])
+
+
 def db_query5(consistency):
     start = time.time()
 
@@ -356,20 +383,25 @@ def queries():
     print('\tConsistency ONE:')
     db_query1(ConsistencyLevel.ONE)
     db_query2(ConsistencyLevel.ONE)
+    db_query3(ConsistencyLevel.ONE)
     db_query5(ConsistencyLevel.ONE)
     print('\tConsistency QUORUM:')
     db_query1(ConsistencyLevel.QUORUM)
     db_query2(ConsistencyLevel.QUORUM)
+    db_query3(ConsistencyLevel.QUORUM)
     db_query5(ConsistencyLevel.QUORUM)
     print('\tConsistency ALL:')
     res1 = db_query1(ConsistencyLevel.ALL)
     res2 = db_query2(ConsistencyLevel.ALL)
+    res3 = db_query3(ConsistencyLevel.ALL)
     res5 = db_query5(ConsistencyLevel.ALL)
 
     print('Query 1 results: ')
     print(res1.to_string())
     print('Query 2 results: ')
     print(res2.to_string())
+    print('Query 3 results: ')
+    print(res3.to_string())
     print('Query 5 results: ')
     print(res5.to_string())
 
@@ -378,7 +410,7 @@ if __name__ == '__main__':
     session = db_connect()
     db_setup()
 
-    create_and_insert_data()
+    # create_and_insert_data()
     # queries()
 
     session.shutdown()
