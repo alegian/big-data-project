@@ -314,19 +314,19 @@ def create_and_insert_data():
     movie_tags_sample = create_movie_tags()
 
     print('Testing insert times for different consistency levels:')
-    print('\tConsistency TWO:')
+    print('Consistency TWO:')
     db_insert('movie_ratings', movie_ratings_sample, ConsistencyLevel.TWO)
     db_insert('movie_details', movie_details_sample, ConsistencyLevel.TWO)
     db_insert('movie_genres', movie_genres_sample, ConsistencyLevel.TWO)
     db_insert('movie_titles', movie_titles_sample, ConsistencyLevel.TWO)
     db_insert('movie_tags', movie_tags_sample, ConsistencyLevel.TWO)
-    print('\tConsistency QUORUM:')
+    print('Consistency QUORUM:')
     db_insert('movie_ratings', movie_ratings_sample, ConsistencyLevel.QUORUM)
     db_insert('movie_details', movie_details_sample, ConsistencyLevel.QUORUM)
     db_insert('movie_genres', movie_genres_sample, ConsistencyLevel.QUORUM)
     db_insert('movie_titles', movie_titles_sample, ConsistencyLevel.QUORUM)
     db_insert('movie_tags', movie_tags_sample, ConsistencyLevel.QUORUM)
-    print('\tConsistency ALL:')
+    print('Consistency ALL:')
     db_insert('movie_ratings', movie_ratings_sample, ConsistencyLevel.ALL)
     db_insert('movie_details', movie_details_sample, ConsistencyLevel.ALL)
     db_insert('movie_genres', movie_genres_sample, ConsistencyLevel.ALL)
@@ -336,142 +336,117 @@ def create_and_insert_data():
 
 def db_query1(consistency):
     start = time.time()
-
-    rows = []
-
-    for i in range(0, 10):
-        query = session.prepare("""
-            SELECT movie_title, avg_rating
-            FROM main.movie_ratings
-            WHERE partition_key = 0
-            ORDER BY avg_rating DESC
-            LIMIT 30
-        """)
-        query.consistency_level = consistency
-        rows = session.execute(query)
-
+    query = session.prepare("""
+        SELECT movie_title, avg_rating
+        FROM main.movie_ratings
+        WHERE partition_key = 0
+        ORDER BY avg_rating DESC
+        LIMIT 30
+    """)
+    query.consistency_level = consistency
+    rows = session.execute(query)
     end = time.time()
-    print(f'\t\tQuery 1 (10 times) took {round(end - start, 4)} seconds')
+    print(round(end - start, 4))
 
     return pd.DataFrame(rows, columns=['movie_title', 'avg_rating'])
 
 
 def db_query2(consistency):
     start = time.time()
-
-    rows = []
-
-    for i in range(0, 10):
-        query = session.prepare("""
-            SELECT movie_title, movie_genres, avg_rating, tag, tag_frequency
-            FROM main.movie_details
-            WHERE movie_title = 'Jumanji (1995)'
-            ORDER BY tag_frequency DESC
-            LIMIT 5
-        """)
-        query.consistency_level = consistency
-        rows = session.execute(query)
-
+    query = session.prepare("""
+        SELECT movie_title, movie_genres, avg_rating, tag, tag_frequency
+        FROM main.movie_details
+        WHERE movie_title = 'Jumanji (1995)'
+        ORDER BY tag_frequency DESC
+        LIMIT 5
+    """)
+    query.consistency_level = consistency
+    rows = session.execute(query)
     end = time.time()
-    print(f'\t\tQuery 2 (10 times) took {round(end - start, 4)} seconds')
+    print(round(end - start, 4))
 
     return pd.DataFrame(rows, columns=['movie_title', 'movie_genres', 'avg_rating', 'tag', 'tag_frequency'])
 
 
 def db_query3(consistency):
     start = time.time()
-
-    rows = []
-
-    for i in range(0, 10):
-        query = session.prepare("""
-            SELECT movie_title, movie_genre, movie_year
-            FROM main.movie_genres
-            WHERE movie_genre = 'Adventure'
-            ORDER BY movie_year DESC
-        """)
-        query.consistency_level = consistency
-        rows = session.execute(query)
-
+    query = session.prepare("""
+        SELECT movie_title, movie_genre, movie_year
+        FROM main.movie_genres
+        WHERE movie_genre = 'Adventure'
+        ORDER BY movie_year DESC
+    """)
+    query.consistency_level = consistency
+    rows = session.execute(query)
     end = time.time()
-    print(f'\t\tQuery 3 (10 times) took {round(end - start, 4)} seconds')
+    print(round(end - start, 4))
 
     return pd.DataFrame(rows, columns=['movie_title', 'movie_genre', 'movie_year'])
 
 
 def db_query4(consistency):
     start = time.time()
-
-    rows = []
-
-    for i in range(0, 10):
-        query = session.prepare("""
-            SELECT movie_title
-            FROM main.movie_titles
-            WHERE movie_title_split CONTAINS 'star'
-        """)
-        query.consistency_level = consistency
-        rows = session.execute(query)
-
+    query = session.prepare("""
+        SELECT movie_title
+        FROM main.movie_titles
+        WHERE movie_title_split CONTAINS 'Star'
+        ALLOW FILTERING
+    """)
+    query.consistency_level = consistency
+    rows = session.execute(query)
     end = time.time()
-    print(f'\t\tQuery 4 (10 times) took {round(end - start, 4)} seconds')
+    print(round(end - start, 4))
 
     return pd.DataFrame(rows, columns=['movie_title'])
 
 
 def db_query5(consistency):
     start = time.time()
-
-    rows = []
-
-    for i in range(0, 10):
-        query = session.prepare("""
-            SELECT movie_title, avg_rating, tag
-            FROM main.movie_tags
-            WHERE tag = 'comedy'
-            ORDER BY avg_rating DESC
-            LIMIT 20
-        """)
-        query.consistency_level = consistency
-        rows = session.execute(query)
-
+    query = session.prepare("""
+        SELECT movie_title, avg_rating, tag
+        FROM main.movie_tags
+        WHERE tag = 'comedy'
+        ORDER BY avg_rating DESC
+        LIMIT 20
+    """)
+    query.consistency_level = consistency
+    rows = session.execute(query)
     end = time.time()
-    print(f'\t\tQuery 5 (10 times) took {round(end - start, 4)} seconds')
+    print(round(end - start, 4))
 
     return pd.DataFrame(rows, columns=['movie_title', 'avg_rating', 'tag'])
 
 
+def all_queries10times(consistency):
+    res = [[]]*5
+    for i in range(0, 10):
+        res[0] = db_query1(consistency)
+        res[1] = db_query2(consistency)
+        res[2] = db_query3(consistency)
+        res[3] = db_query4(consistency)
+        res[4] = db_query5(consistency)
+    return res
+
+
 def queries():
     print('Testing query times for different consistency levels:')
-    print('\tConsistency ONE:')
-    db_query1(ConsistencyLevel.ONE)
-    db_query2(ConsistencyLevel.ONE)
-    db_query3(ConsistencyLevel.ONE)
-    db_query4(ConsistencyLevel.ONE)
-    db_query5(ConsistencyLevel.ONE)
-    print('\tConsistency QUORUM:')
-    db_query1(ConsistencyLevel.QUORUM)
-    db_query2(ConsistencyLevel.QUORUM)
-    db_query3(ConsistencyLevel.QUORUM)
-    db_query4(ConsistencyLevel.QUORUM)
-    db_query5(ConsistencyLevel.QUORUM)
-    print('\tConsistency ALL:')
-    res1 = db_query1(ConsistencyLevel.ALL)
-    res2 = db_query2(ConsistencyLevel.ALL)
-    res3 = db_query3(ConsistencyLevel.ALL)
-    res4 = db_query4(ConsistencyLevel.ALL)
-    res5 = db_query5(ConsistencyLevel.ALL)
+    print('Consistency ONE:')
+    all_queries10times(ConsistencyLevel.ONE)
+    print('Consistency QUORUM:')
+    all_queries10times(ConsistencyLevel.QUORUM)
+    print('Consistency ALL:')
+    res = all_queries10times(ConsistencyLevel.ALL)
 
     print('Query 1 results: ')
-    print(res1.to_string())
+    print(res[0].head(5).to_string())
     print('Query 2 results: ')
-    print(res2.to_string())
+    print(res[1].to_string())
     print('Query 3 results: ')
-    print(res3.to_string())
+    print(res[2].head(5).to_string())
     print('Query 4 results: ')
-    print(res4.to_string())
+    print(res[3].head(5).to_string())
     print('Query 5 results: ')
-    print(res5.to_string())
+    print(res[4].head(5).to_string())
 
 
 if __name__ == '__main__':
